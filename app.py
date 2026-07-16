@@ -1,6 +1,10 @@
 #!/usr/bin/env python3
 import hmac
 import os
+import secrets
+import subprocess
+import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -10,12 +14,19 @@ from flask import (  # pyright: ignore[reportMissingImports]
     redirect,
     render_template_string,
     request,
+    session,
     url_for,
 )
 from spotipy.oauth2 import SpotifyOAuth  # pyright: ignore[reportMissingImports]
 
 app = Flask(__name__)
 app.secret_key = os.environ.get("MUSIC_SYNC_WEB_SECRET", os.urandom(32).hex())
+app.config.update(
+    MAX_CONTENT_LENGTH=64 * 1024,
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "").startswith("https://"),
+)
 
 CONFIG_ROOT = Path("/config")
 SPOTIFY_CACHE_PATH = Path(os.environ.get("SPOTIFY_CACHE_PATH", "/config/spotify/spotipy-token.json"))
@@ -25,10 +36,18 @@ PUBLIC_URL = os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "")
 WEB_USERNAME = os.environ.get("MUSIC_SYNC_WEB_USERNAME", "music-admin")
 WEB_PASSWORD = os.environ.get("MUSIC_SYNC_WEB_PASSWORD", "")
 AUDIO_EXTENSIONS = ("*.mp3", "*.opus", "*.m4a", "*.ogg", "*.webm")
+_sync_lock = threading.Lock()
 
 
 def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _positive_int(value: str | None, default: int) -> int:
+    try:
+        return max(1, int(value or default))
+    except (TypeError, ValueError):
+        return default
 
 
 def _count_audio_files(root: Path) -> int:
@@ -83,7 +102,20 @@ def protect_setup_ui():
     return None
 
 
-def spotify_oauth() -> SpotifyOAuth:
+@app.after_request
+def set_security_headers(response: Response) -> Response:
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; "
+        "form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
+    )
+    return response
+
+
+def spotify_oauth(*, state: str | None = None) -> SpotifyOAuth:
     return SpotifyOAuth(
         client_id=os.environ.get("SPOTIPY_CLIENT_ID", ""),
         client_secret=os.environ.get("SPOTIPY_CLIENT_SECRET", ""),
@@ -91,6 +123,7 @@ def spotify_oauth() -> SpotifyOAuth:
         scope="user-library-read playlist-read-private playlist-read-collaborative",
         cache_path=str(SPOTIFY_CACHE_PATH),
         open_browser=False,
+        state=state,
     )
 
 
@@ -103,7 +136,7 @@ def health():
 def api_status():
     """Status endpoint consumed by the homelab toolkit MusicSyncClient."""
     heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else ""
-    interval_minutes = int(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES", "60") or "60")
+    interval_minutes = _positive_int(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES"), 60)
     heartbeat_age = _heartbeat_age_seconds(heartbeat)
     spotify_ready = SPOTIFY_CACHE_PATH.exists()
     ytmusic_ready = YTMUSIC_AUTH_FILE.exists()
@@ -148,13 +181,16 @@ def api_status():
 @app.post("/api/sync")
 def api_sync():
     """Trigger an immediate sync run asynchronously."""
-    import subprocess
-    import threading
+    if not _sync_lock.acquire(blocking=False):
+        return {"status": "already_running"}, 409
 
     def _run():
-        subprocess.run(["python", "/app/sync.py"], check=False)  # noqa: S603 S607
+        try:
+            subprocess.run([sys.executable, "/app/sync.py"], check=False)  # noqa: S603
+        finally:
+            _sync_lock.release()
 
-    threading.Thread(target=_run, daemon=True).start()
+    threading.Thread(target=_run, name="manual-music-sync", daemon=True).start()
     return {"status": "started"}, 202
 
 
@@ -183,17 +219,25 @@ def index():
 
 @app.get("/spotify/start")
 def spotify_start():
-    auth = spotify_oauth()
+    state = secrets.token_urlsafe(32)
+    session["spotify_oauth_state"] = state
+    auth = spotify_oauth(state=state)
     return redirect(auth.get_authorize_url())
 
 
 @app.get("/spotify/callback")
 def spotify_callback():
     code = request.args.get("code", "")
-    if not code:
-        return redirect(url_for("index"))
+    actual_state = request.args.get("state", "")
+    expected_state = session.pop("spotify_oauth_state", "")
+    if not code or not actual_state or not expected_state or not hmac.compare_digest(actual_state, expected_state):
+        return Response("Invalid or expired Spotify authorization request", status=400)
     auth = spotify_oauth()
-    auth.get_access_token(code=code, as_dict=False)
+    try:
+        auth.get_access_token(code=code, as_dict=False)
+    except Exception:  # noqa: BLE001 - provider failures must not leak response details
+        app.logger.exception("Spotify OAuth token exchange failed")
+        return Response("Spotify authorization failed; retry the connection flow", status=502)
     return render_template_string(
         SUCCESS_TEMPLATE,
         title="Spotify Connected",

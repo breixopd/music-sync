@@ -19,13 +19,31 @@ def heartbeat() -> None:
     Path("/tmp/music-sync-heartbeat").write_text(datetime.now(UTC).isoformat())
 
 
+def _interval_minutes(raw: str | None) -> int:
+    try:
+        return max(1, int(raw or "60"))
+    except (TypeError, ValueError):
+        return 60
+
+
+def _terminate(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
 def main() -> int:
     # Create required directories
     for d in ("/config/spotify", "/config/ytmusic", "/config/state", "/music"):
         Path(d).mkdir(parents=True, exist_ok=True)
 
     # Start gunicorn in background (single worker for OAuth session consistency)
-    gunicorn = subprocess.Popen(
+    web = subprocess.Popen(
         [
             sys.executable,
             "-m",
@@ -42,25 +60,41 @@ def main() -> int:
         ],
     )
 
-    def cleanup():
-        gunicorn.terminate()
-        gunicorn.wait(timeout=10)
+    stop_requested = False
+    worker: subprocess.Popen[bytes] | None = None
 
-    signal.signal(signal.SIGTERM, lambda *_: cleanup() or sys.exit(0))
-    signal.signal(signal.SIGINT, lambda *_: cleanup() or sys.exit(0))
+    def request_stop(*_: object) -> None:
+        nonlocal stop_requested
+        stop_requested = True
 
-    # Parse interval from env
-    interval_str = os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES", "60")
+    signal.signal(signal.SIGTERM, request_stop)
+    signal.signal(signal.SIGINT, request_stop)
+    interval_seconds = _interval_minutes(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES")) * 60
+
     try:
-        interval_minutes = max(1, int(interval_str))
-    except (ValueError, TypeError):
-        interval_minutes = 60
+        while not stop_requested:
+            if web.poll() is not None:
+                return web.returncode or 1
 
-    while True:
-        heartbeat()
-        subprocess.run([sys.executable, "/app/sync.py"], check=False)
-        heartbeat()
-        time.sleep(interval_minutes * 60)
+            heartbeat()
+            worker = subprocess.Popen([sys.executable, "/app/sync.py"])  # noqa: S603
+            while worker.poll() is None and not stop_requested:
+                if web.poll() is not None:
+                    return web.returncode or 1
+                time.sleep(1)
+            heartbeat()
+
+            for _ in range(interval_seconds):
+                if stop_requested:
+                    break
+                if web.poll() is not None:
+                    return web.returncode or 1
+                time.sleep(1)
+        return 0
+    finally:
+        if worker is not None:
+            _terminate(worker)
+        _terminate(web)
 
 
 if __name__ == "__main__":

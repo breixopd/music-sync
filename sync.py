@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import fcntl
 import json
 import os
 import subprocess
@@ -12,6 +13,7 @@ from ytmusicapi import YTMusic  # pyright: ignore[reportMissingImports]
 
 CONFIG_ROOT = Path("/config")
 STATE_ROOT = CONFIG_ROOT / "state"
+SYNC_LOCK_FILE = STATE_ROOT / "sync.lock"
 SPOTIFY_STATE_FILE = STATE_ROOT / "spotify-downloaded.json"
 YTMUSIC_ARCHIVE_FILE = STATE_ROOT / "ytmusic-archive.txt"
 MUSIC_ROOT = Path("/music")
@@ -44,13 +46,19 @@ def _load_json_list(path: Path) -> set[str]:
     if not path.exists():
         return set()
     try:
-        return set(json.loads(path.read_text()))
-    except json.JSONDecodeError:
+        values = json.loads(path.read_text())
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            return set()
+        return set(values)
+    except (json.JSONDecodeError, OSError):
         return set()
 
 
 def _save_json_list(path: Path, values: set[str]) -> None:
-    path.write_text(json.dumps(sorted(values), indent=2))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(json.dumps(sorted(values), indent=2))
+    os.replace(temporary, path)
 
 
 def _split_csv(value: str) -> list[str]:
@@ -255,11 +263,18 @@ def sync_ytmusic() -> None:
             _delete_paths(paths)
 
 
-def main() -> None:
+def main() -> int:
     _ensure_paths()
-    sync_spotify()
-    sync_ytmusic()
+    with SYNC_LOCK_FILE.open("a+") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print("A music sync is already running; skipping this trigger.")
+            return 0
+        sync_spotify()
+        sync_ytmusic()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
