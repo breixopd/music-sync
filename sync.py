@@ -1,0 +1,265 @@
+#!/usr/bin/env python3
+import json
+import os
+import subprocess
+from collections.abc import Iterable
+from dataclasses import dataclass
+from pathlib import Path
+
+from spotipy import Spotify  # pyright: ignore[reportMissingImports]
+from spotipy.oauth2 import SpotifyOAuth  # pyright: ignore[reportMissingImports]
+from ytmusicapi import YTMusic  # pyright: ignore[reportMissingImports]
+
+CONFIG_ROOT = Path("/config")
+STATE_ROOT = CONFIG_ROOT / "state"
+SPOTIFY_STATE_FILE = STATE_ROOT / "spotify-downloaded.json"
+YTMUSIC_ARCHIVE_FILE = STATE_ROOT / "ytmusic-archive.txt"
+MUSIC_ROOT = Path("/music")
+SPOTIFY_OUTPUT = MUSIC_ROOT / "Spotify"
+YTMUSIC_OUTPUT = MUSIC_ROOT / "YouTube Music"
+SPOTIFY_CACHE_PATH = os.environ.get("SPOTIFY_CACHE_PATH", "/config/spotify/spotipy-token.json")
+YTMUSIC_AUTH_FILE = os.environ.get("YTMUSIC_AUTH_FILE", "/config/ytmusic/headers_auth.json")
+SPOTIFY_REDIRECT_URI = os.environ.get(
+    "SPOTIPY_REDIRECT_URI",
+    os.environ.get("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback"),
+)
+SPOTIPY_CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID", "")
+SPOTIPY_CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET", "")
+YTMUSIC_FETCH_LIMIT = int(os.environ.get("MUSIC_SYNC_YTMUSIC_LIMIT", "5000"))
+
+
+@dataclass(frozen=True, slots=True)
+class SpotifyTrack:
+    track_id: str
+    title: str
+    artists: str
+
+
+def _ensure_paths() -> None:
+    for path in [STATE_ROOT, SPOTIFY_OUTPUT, YTMUSIC_OUTPUT]:
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def _load_json_list(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    try:
+        return set(json.loads(path.read_text()))
+    except json.JSONDecodeError:
+        return set()
+
+
+def _save_json_list(path: Path, values: set[str]) -> None:
+    path.write_text(json.dumps(sorted(values), indent=2))
+
+
+def _split_csv(value: str) -> list[str]:
+    return [item.strip() for item in value.split(",") if item.strip()]
+
+
+def _prefixed_audio_files(root: Path) -> dict[str, list[Path]]:
+    indexed: dict[str, list[Path]] = {}
+    if not root.exists():
+        return indexed
+    for ext in ("*.mp3", "*.opus", "*.m4a", "*.ogg", "*.webm"):
+        for path in root.glob(ext):
+            prefix = path.name.split(" - ", 1)[0]
+            indexed.setdefault(prefix, []).append(path)
+    return indexed
+
+
+def _delete_paths(paths: list[Path]) -> None:
+    for path in paths:
+        if path.exists():
+            path.unlink()
+
+
+def _spotify_client() -> Spotify | None:
+    if not SPOTIPY_CLIENT_ID or not SPOTIPY_CLIENT_SECRET:
+        return None
+    auth = SpotifyOAuth(
+        client_id=SPOTIPY_CLIENT_ID,
+        client_secret=SPOTIPY_CLIENT_SECRET,
+        redirect_uri=SPOTIFY_REDIRECT_URI,
+        scope="user-library-read playlist-read-private playlist-read-collaborative",
+        cache_path=SPOTIFY_CACHE_PATH,
+        open_browser=False,
+    )
+    token = auth.get_cached_token()
+    if not token:
+        print("Spotify token cache missing. Run spotify_auth.py first.")
+        return None
+    return Spotify(auth_manager=auth)
+
+
+def _spotify_track(item: dict) -> SpotifyTrack | None:
+    track = item.get("track") or {}
+    track_id = track.get("id")
+    title = track.get("name")
+    artists = ", ".join(artist.get("name", "") for artist in track.get("artists", []) if artist.get("name"))
+    if not track_id or not title or not artists:
+        return None
+    return SpotifyTrack(track_id=track_id, title=title, artists=artists)
+
+
+def _iter_spotify_saved_tracks(sp: Spotify) -> Iterable[SpotifyTrack]:
+    offset = 0
+    while True:
+        batch = sp.current_user_saved_tracks(limit=50, offset=offset)
+        items = batch.get("items", [])
+        if not items:
+            break
+        for item in items:
+            track = _spotify_track(item)
+            if track is not None:
+                yield track
+        offset += len(items)
+
+
+def _iter_spotify_playlist_tracks(sp: Spotify, playlist_ref: str) -> Iterable[SpotifyTrack]:
+    offset = 0
+    while True:
+        batch = sp.playlist_items(playlist_ref, limit=100, offset=offset)
+        items = batch.get("items", [])
+        if not items:
+            break
+        for item in items:
+            track = _spotify_track(item)
+            if track is not None:
+                yield track
+        offset += len(items)
+
+
+def _download_spotify_track(track: SpotifyTrack) -> None:
+    query = f"ytsearch1:{track.artists} - {track.title} official audio"
+    try:
+        subprocess.run(
+            [
+                "yt-dlp",
+                "--no-playlist",
+                "--extract-audio",
+                "--audio-format",
+                "mp3",
+                "--audio-quality",
+                "0",
+                "--embed-thumbnail",
+                "--embed-metadata",
+                "--output",
+                str(SPOTIFY_OUTPUT / f"{track.track_id} - %(title)s.%(ext)s"),
+                query,
+            ],
+            check=True,
+            timeout=900,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print(f"Failed to download Spotify track: {track.artists} - {track.title}")
+
+
+def sync_spotify() -> None:
+    sp = _spotify_client()
+    if sp is None:
+        return
+
+    desired: dict[str, SpotifyTrack] = {}
+
+    if os.environ.get("MUSIC_SYNC_SPOTIFY_SAVED_TRACKS", "false").lower() == "true":
+        for track in _iter_spotify_saved_tracks(sp):
+            desired[track.track_id] = track
+
+    for playlist_ref in _split_csv(os.environ.get("MUSIC_SYNC_SPOTIFY_PLAYLISTS", "")):
+        for track in _iter_spotify_playlist_tracks(sp, playlist_ref):
+            desired[track.track_id] = track
+
+    current_files = _prefixed_audio_files(SPOTIFY_OUTPUT)
+    for track_id, track in desired.items():
+        if track_id not in current_files:
+            print(f"Spotify: downloading {track.artists} - {track.title}")
+            _download_spotify_track(track)
+
+    for track_id, paths in current_files.items():
+        if track_id not in desired:
+            print(f"Spotify: pruning orphaned track {track_id}")
+            _delete_paths(paths)
+
+    _save_json_list(SPOTIFY_STATE_FILE, set(desired))
+
+
+def _ytmusic_client() -> YTMusic | None:
+    auth_file = Path(YTMUSIC_AUTH_FILE)
+    if not auth_file.exists():
+        print("YouTube Music auth missing. Run ytmusic_auth.py first.")
+        return None
+    return YTMusic(str(auth_file))
+
+
+def _ytmusic_playlist_id(ref: str) -> str:
+    if "list=" in ref:
+        return ref.split("list=", 1)[1].split("&", 1)[0]
+    return ref
+
+
+def _download_youtube_video(video_id: str) -> None:
+    try:
+        subprocess.run(
+            [
+                "yt-dlp",
+                "--download-archive",
+                str(YTMUSIC_ARCHIVE_FILE),
+                "-f",
+                "bestaudio",
+                "-x",
+                "--audio-format",
+                "mp3",
+                f"https://www.youtube.com/watch?v={video_id}",
+                "-o",
+                str(YTMUSIC_OUTPUT / "%(id)s - %(title)s.%(ext)s"),
+            ],
+            check=True,
+            timeout=900,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        print(f"Failed to download youtube track: {video_id}")
+
+
+def sync_ytmusic() -> None:
+    client = _ytmusic_client()
+    if client is None:
+        return
+
+    desired_ids: set[str] = set()
+
+    if os.environ.get("MUSIC_SYNC_YTMUSIC_LIKED", "false").lower() == "true":
+        liked = client.get_liked_songs(limit=YTMUSIC_FETCH_LIMIT)
+        for entry in liked.get("tracks", liked.get("contents", [])):
+            video_id = entry.get("videoId")
+            if video_id:
+                desired_ids.add(video_id)
+                if video_id not in _prefixed_audio_files(YTMUSIC_OUTPUT):
+                    print(f"YouTube Music: downloading liked track {video_id}")
+                    _download_youtube_video(video_id)
+
+    for playlist_ref in _split_csv(os.environ.get("MUSIC_SYNC_YTMUSIC_PLAYLISTS", "")):
+        playlist = client.get_playlist(_ytmusic_playlist_id(playlist_ref), limit=YTMUSIC_FETCH_LIMIT)
+        for entry in playlist.get("tracks", []):
+            video_id = entry.get("videoId")
+            if video_id:
+                desired_ids.add(video_id)
+                if video_id not in _prefixed_audio_files(YTMUSIC_OUTPUT):
+                    print(f"YouTube Music: downloading playlist track {video_id}")
+                    _download_youtube_video(video_id)
+
+    current_files = _prefixed_audio_files(YTMUSIC_OUTPUT)
+    for video_id, paths in current_files.items():
+        if video_id not in desired_ids:
+            print(f"YouTube Music: pruning orphaned track {video_id}")
+            _delete_paths(paths)
+
+
+def main() -> None:
+    _ensure_paths()
+    sync_spotify()
+    sync_ytmusic()
+
+
+if __name__ == "__main__":
+    main()
