@@ -20,13 +20,20 @@ from flask import (  # pyright: ignore[reportMissingImports]
 )
 from spotipy.oauth2 import SpotifyOAuth  # pyright: ignore[reportMissingImports]
 
+WEB_USERNAME = os.environ.get("MUSIC_SYNC_WEB_USERNAME", "music-admin")
+WEB_PASSWORD = os.environ.get("MUSIC_SYNC_WEB_PASSWORD", "")
 app = Flask(__name__)
-app.secret_key = os.environ.get("MUSIC_SYNC_WEB_SECRET", os.urandom(32).hex())
+# The explicit secret is preferred. Falling back to the already-required admin
+# password keeps sessions stable across restarts without adding a new deployment
+# variable to the homelab contract. A random fallback is only for the already
+# fail-closed, unauthenticated development state.
+app.secret_key = os.environ.get("MUSIC_SYNC_WEB_SECRET") or WEB_PASSWORD or secrets.token_hex(32)
 app.config.update(
     MAX_CONTENT_LENGTH=64 * 1024,
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
     SESSION_COOKIE_SECURE=os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "").startswith("https://"),
+    PERMANENT_SESSION_LIFETIME=600,
 )
 
 CONFIG_ROOT = Path("/config")
@@ -35,8 +42,6 @@ YTMUSIC_AUTH_FILE = Path(os.environ.get("YTMUSIC_AUTH_FILE", "/config/ytmusic/he
 HEARTBEAT_FILE = Path("/tmp/music-sync-heartbeat")
 RUN_STATE_FILE = CONFIG_ROOT / "state" / "run.json"
 PUBLIC_URL = os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "")
-WEB_USERNAME = os.environ.get("MUSIC_SYNC_WEB_USERNAME", "music-admin")
-WEB_PASSWORD = os.environ.get("MUSIC_SYNC_WEB_PASSWORD", "")
 AUDIO_EXTENSIONS = ("*.mp3", "*.opus", "*.m4a", "*.ogg", "*.webm")
 _sync_lock = threading.Lock()
 
@@ -272,6 +277,7 @@ def index():
 @app.get("/spotify/start")
 def spotify_start():
     state = secrets.token_urlsafe(32)
+    session.permanent = True
     session["spotify_oauth_state"] = state
     auth = spotify_oauth(state=state)
     return redirect(auth.get_authorize_url())

@@ -9,6 +9,12 @@ def test_invalid_interval_uses_safe_default() -> None:
     assert run._interval_minutes("15") == 15
 
 
+def test_failure_backoff_is_bounded() -> None:
+    assert run._failure_backoff_seconds("invalid") == 300
+    assert run._failure_backoff_seconds("1") == 30
+    assert run._failure_backoff_seconds("999999") == 3600
+
+
 def test_runner_exits_when_web_process_dies() -> None:
     web = MagicMock()
     web.poll.side_effect = [None, None, 17, 17]

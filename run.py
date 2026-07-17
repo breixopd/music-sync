@@ -26,6 +26,13 @@ def _interval_minutes(raw: str | None) -> int:
         return 60
 
 
+def _failure_backoff_seconds(raw: str | None) -> int:
+    try:
+        return min(3600, max(30, int(raw or "300")))
+    except (TypeError, ValueError):
+        return 300
+
+
 def _terminate(process: subprocess.Popen[bytes]) -> None:
     if process.poll() is not None:
         return
@@ -56,6 +63,16 @@ def main() -> int:
             "4",
             "--timeout",
             "120",
+            "--graceful-timeout",
+            "30",
+            "--max-requests",
+            "1000",
+            "--max-requests-jitter",
+            "100",
+            "--access-logfile",
+            "-",
+            "--error-logfile",
+            "-",
             "app:app",
         ],
     )
@@ -70,6 +87,7 @@ def main() -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     interval_seconds = _interval_minutes(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES")) * 60
+    failure_backoff_seconds = _failure_backoff_seconds(os.environ.get("MUSIC_SYNC_FAILURE_BACKOFF_SECONDS"))
 
     try:
         while not stop_requested:
@@ -83,6 +101,16 @@ def main() -> int:
                     return web.returncode or 1
                 time.sleep(1)
             heartbeat()
+
+            if worker.returncode:
+                print(f"Sync worker exited with status {worker.returncode}; retrying after backoff.", flush=True)
+                for _ in range(failure_backoff_seconds):
+                    if stop_requested:
+                        break
+                    if web.poll() is not None:
+                        return web.returncode or 1
+                    time.sleep(1)
+                continue
 
             for _ in range(interval_seconds):
                 if stop_requested:

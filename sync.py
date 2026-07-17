@@ -29,7 +29,17 @@ SPOTIFY_REDIRECT_URI = os.environ.get(
 )
 SPOTIPY_CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID", "")
 SPOTIPY_CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET", "")
-YTMUSIC_FETCH_LIMIT = int(os.environ.get("MUSIC_SYNC_YTMUSIC_LIMIT", "5000"))
+
+
+def _positive_int(raw: str | None, default: int, maximum: int | None = None) -> int:
+    try:
+        value = max(1, int(raw or default))
+    except (TypeError, ValueError):
+        return default
+    return min(value, maximum) if maximum is not None else value
+
+
+YTMUSIC_FETCH_LIMIT = _positive_int(os.environ.get("MUSIC_SYNC_YTMUSIC_LIMIT"), 5000, 10000)
 RUN_STATE_FILE = STATE_ROOT / "run.json"
 
 
