@@ -90,6 +90,26 @@ class TestSyncHealth:
         assert resp.status_code == 200
         assert resp.json["sync_interval_minutes"] == 60
 
+    def test_metrics_are_scrapable_without_admin_credentials(self, client):
+        with patch.object(sync_app, "WEB_PASSWORD", ""):
+            response = client.get("/metrics")
+
+        assert response.status_code == 200
+        assert b"music_sync_up 1" in response.data
+        assert response.mimetype == "text/plain"
+
+    def test_status_includes_persisted_run_state(self, client, tmp_path: Path):
+        state_file = tmp_path / "run.json"
+        state_file.write_text('{"status": "failed", "error": "provider unavailable"}')
+        with (
+            patch.object(sync_app, "WEB_USERNAME", "admin"),
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+            patch.object(sync_app, "RUN_STATE_FILE", state_file),
+        ):
+            response = client.get("/api/status", headers=_auth())
+
+        assert response.json["sync_status"] == "failed"
+
 
 class TestSpotifyFlow:
     def test_spotify_start_redirects(self, client):
@@ -217,7 +237,7 @@ class TestSyncCoordination:
 
         sync_worker._save_json_list(state_file, {"b", "a"})
 
-        assert state_file.read_text() == '[\n  "a",\n  "b"\n]'
+        assert state_file.read_text() == '[\n  "a",\n  "b"\n]\n'
         assert not state_file.with_suffix(".json.tmp").exists()
 
     def test_main_skips_when_process_lock_is_held(self, tmp_path: Path):

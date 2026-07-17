@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hmac
+import json
 import os
 import secrets
 import subprocess
@@ -32,6 +33,7 @@ CONFIG_ROOT = Path("/config")
 SPOTIFY_CACHE_PATH = Path(os.environ.get("SPOTIFY_CACHE_PATH", "/config/spotify/spotipy-token.json"))
 YTMUSIC_AUTH_FILE = Path(os.environ.get("YTMUSIC_AUTH_FILE", "/config/ytmusic/headers_auth.json"))
 HEARTBEAT_FILE = Path("/tmp/music-sync-heartbeat")
+RUN_STATE_FILE = CONFIG_ROOT / "state" / "run.json"
 PUBLIC_URL = os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "")
 WEB_USERNAME = os.environ.get("MUSIC_SYNC_WEB_USERNAME", "music-admin")
 WEB_PASSWORD = os.environ.get("MUSIC_SYNC_WEB_PASSWORD", "")
@@ -71,6 +73,19 @@ def _heartbeat_age_seconds(raw: str) -> int | None:
     return max(0, int((datetime.now(UTC) - parsed).total_seconds()))
 
 
+def _read_run_state() -> dict[str, object]:
+    try:
+        value = json.loads(RUN_STATE_FILE.read_text())
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _metric(name: str, value: object, help_text: str, metric_type: str = "gauge") -> str:
+    escaped = help_text.replace("\\", "\\\\").replace("\n", "\\n")
+    return f"# HELP {name} {escaped}\n# TYPE {name} {metric_type}\n{name} {value}\n"
+
+
 def _requires_auth() -> bool:
     return bool(WEB_PASSWORD)
 
@@ -87,6 +102,8 @@ def _unauthorized() -> Response:
 def protect_setup_ui():
     # Missing generated credentials are a deployment error, never an instruction
     # to expose the setup and sync APIs without authentication.
+    if request.path == "/metrics":
+        return None
     if not _requires_auth():
         return Response("Setup UI credentials are not configured", status=503)
     if request.path == "/health":
@@ -138,6 +155,7 @@ def api_status():
     heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else ""
     interval_minutes = _positive_int(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES"), 60)
     heartbeat_age = _heartbeat_age_seconds(heartbeat)
+    run_state = _read_run_state()
     spotify_ready = SPOTIFY_CACHE_PATH.exists()
     ytmusic_ready = YTMUSIC_AUTH_FILE.exists()
     spotify_playlists = _split_csv(os.environ.get("MUSIC_SYNC_SPOTIFY_PLAYLISTS", ""))
@@ -162,7 +180,12 @@ def api_status():
     return {
         "running": heartbeat_age is not None and heartbeat_age <= max(interval_minutes * 120, 900),
         "last_sync": heartbeat,
-        "heartbeat_age_seconds": heartbeat_age or 0,
+        "heartbeat_age_seconds": heartbeat_age,
+        "sync_status": run_state.get("status", "unknown"),
+        "sync_started_at": run_state.get("started_at"),
+        "sync_finished_at": run_state.get("finished_at"),
+        "sync_duration_seconds": run_state.get("duration_seconds"),
+        "sync_sources": run_state.get("sources", []),
         "sync_interval_minutes": interval_minutes,
         "spotify_ready": spotify_ready,
         "ytmusic_ready": ytmusic_ready,
@@ -176,6 +199,35 @@ def api_status():
         "ytmusic_liked_enabled": ytmusic_liked,
         "warnings": warnings,
     }
+
+
+@app.get("/metrics")
+def metrics():
+    """Expose stable, dependency-free Prometheus metrics for homelab scraping."""
+    state = _read_run_state()
+    status = state.get("status", "unknown")
+    success = 1 if status == "success" else 0
+    running = 1 if status == "running" else 0
+    failed = 1 if status == "failed" else 0
+    heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else ""
+    age = _heartbeat_age_seconds(heartbeat)
+    lines = [
+        _metric("music_sync_up", 1, "Whether the web process is serving requests."),
+        _metric("music_sync_run_running", running, "Whether a synchronization run is active."),
+        _metric("music_sync_last_run_success", success, "Whether the latest synchronization run succeeded."),
+        _metric("music_sync_last_run_failed", failed, "Whether the latest synchronization run failed."),
+        _metric(
+            "music_sync_heartbeat_age_seconds",
+            age if age is not None else -1,
+            "Age of the scheduler heartbeat in seconds.",
+        ),
+        _metric(
+            "music_sync_tracks_total",
+            _count_audio_files(Path("/music/Spotify")) + _count_audio_files(Path("/music/YouTube Music")),
+            "Total downloaded audio files.",
+        ),
+    ]
+    return Response("".join(lines), mimetype="text/plain; version=0.0.4")
 
 
 @app.post("/api/sync")

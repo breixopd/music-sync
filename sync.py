@@ -3,8 +3,10 @@ import fcntl
 import json
 import os
 import subprocess
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from spotipy import Spotify  # pyright: ignore[reportMissingImports]
@@ -28,6 +30,7 @@ SPOTIFY_REDIRECT_URI = os.environ.get(
 SPOTIPY_CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID", "")
 SPOTIPY_CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET", "")
 YTMUSIC_FETCH_LIMIT = int(os.environ.get("MUSIC_SYNC_YTMUSIC_LIMIT", "5000"))
+RUN_STATE_FILE = STATE_ROOT / "run.json"
 
 
 @dataclass(frozen=True, slots=True)
@@ -35,6 +38,29 @@ class SpotifyTrack:
     track_id: str
     title: str
     artists: str
+
+
+@dataclass(slots=True)
+class SourceResult:
+    name: str
+    configured: bool = False
+    success: bool = False
+    discovered: int = 0
+    downloaded: int = 0
+    failed: int = 0
+    error: str | None = None
+
+
+def _now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _write_run_state(**values: object) -> None:
+    state = {"updated_at": _now(), **values}
+    temporary = RUN_STATE_FILE.with_suffix(".tmp")
+    RUN_STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, RUN_STATE_FILE)
 
 
 def _ensure_paths() -> None:
@@ -57,7 +83,7 @@ def _load_json_list(path: Path) -> set[str]:
 def _save_json_list(path: Path, values: set[str]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(f"{path.suffix}.tmp")
-    temporary.write_text(json.dumps(sorted(values), indent=2))
+    temporary.write_text(json.dumps(sorted(values), indent=2) + "\n")
     os.replace(temporary, path)
 
 
@@ -138,7 +164,7 @@ def _iter_spotify_playlist_tracks(sp: Spotify, playlist_ref: str) -> Iterable[Sp
         offset += len(items)
 
 
-def _download_spotify_track(track: SpotifyTrack) -> None:
+def _download_spotify_track(track: SpotifyTrack) -> bool:
     query = f"ytsearch1:{track.artists} - {track.title} official audio"
     try:
         subprocess.run(
@@ -161,13 +187,21 @@ def _download_spotify_track(track: SpotifyTrack) -> None:
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print(f"Failed to download Spotify track: {track.artists} - {track.title}")
+        return False
+    return True
 
 
-def sync_spotify() -> None:
+def sync_spotify() -> SourceResult:
     sp = _spotify_client()
     if sp is None:
-        return
+        configured = bool(SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET)
+        return SourceResult(
+            "spotify",
+            configured=configured,
+            error="OAuth token is not available" if configured else None,
+        )
 
+    result = SourceResult("spotify", configured=True)
     desired: dict[str, SpotifyTrack] = {}
 
     if os.environ.get("MUSIC_SYNC_SPOTIFY_SAVED_TRACKS", "false").lower() == "true":
@@ -179,17 +213,30 @@ def sync_spotify() -> None:
             desired[track.track_id] = track
 
     current_files = _prefixed_audio_files(SPOTIFY_OUTPUT)
+    result.discovered = len(desired)
     for track_id, track in desired.items():
         if track_id not in current_files:
             print(f"Spotify: downloading {track.artists} - {track.title}")
-            _download_spotify_track(track)
+            try:
+                if _download_spotify_track(track):
+                    result.downloaded += 1
+                else:
+                    result.failed += 1
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                result.failed += 1
 
+    # Never prune after a partial provider response. A successful empty result
+    # is safe; an exception above is not.
     for track_id, paths in current_files.items():
         if track_id not in desired:
             print(f"Spotify: pruning orphaned track {track_id}")
             _delete_paths(paths)
 
     _save_json_list(SPOTIFY_STATE_FILE, set(desired))
+    result.success = result.failed == 0
+    if result.failed:
+        result.error = f"{result.failed} Spotify download(s) failed"
+    return result
 
 
 def _ytmusic_client() -> YTMusic | None:
@@ -206,7 +253,7 @@ def _ytmusic_playlist_id(ref: str) -> str:
     return ref
 
 
-def _download_youtube_video(video_id: str) -> None:
+def _download_youtube_video(video_id: str) -> bool:
     try:
         subprocess.run(
             [
@@ -227,14 +274,18 @@ def _download_youtube_video(video_id: str) -> None:
         )
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
         print(f"Failed to download youtube track: {video_id}")
+        return False
+    return True
 
 
-def sync_ytmusic() -> None:
+def sync_ytmusic() -> SourceResult:
     client = _ytmusic_client()
     if client is None:
-        return
+        return SourceResult("ytmusic", configured=Path(YTMUSIC_AUTH_FILE).exists(), error="auth file is not available")
 
+    result = SourceResult("ytmusic", configured=True)
     desired_ids: set[str] = set()
+    current_files = _prefixed_audio_files(YTMUSIC_OUTPUT)
 
     if os.environ.get("MUSIC_SYNC_YTMUSIC_LIKED", "false").lower() == "true":
         liked = client.get_liked_songs(limit=YTMUSIC_FETCH_LIMIT)
@@ -242,9 +293,15 @@ def sync_ytmusic() -> None:
             video_id = entry.get("videoId")
             if video_id:
                 desired_ids.add(video_id)
-                if video_id not in _prefixed_audio_files(YTMUSIC_OUTPUT):
+                if video_id not in current_files:
                     print(f"YouTube Music: downloading liked track {video_id}")
-                    _download_youtube_video(video_id)
+                    try:
+                        if _download_youtube_video(video_id):
+                            result.downloaded += 1
+                        else:
+                            result.failed += 1
+                    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                        result.failed += 1
 
     for playlist_ref in _split_csv(os.environ.get("MUSIC_SYNC_YTMUSIC_PLAYLISTS", "")):
         playlist = client.get_playlist(_ytmusic_playlist_id(playlist_ref), limit=YTMUSIC_FETCH_LIMIT)
@@ -252,28 +309,71 @@ def sync_ytmusic() -> None:
             video_id = entry.get("videoId")
             if video_id:
                 desired_ids.add(video_id)
-                if video_id not in _prefixed_audio_files(YTMUSIC_OUTPUT):
+                if video_id not in current_files:
                     print(f"YouTube Music: downloading playlist track {video_id}")
-                    _download_youtube_video(video_id)
+                    try:
+                        if _download_youtube_video(video_id):
+                            result.downloaded += 1
+                        else:
+                            result.failed += 1
+                    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                        result.failed += 1
 
-    current_files = _prefixed_audio_files(YTMUSIC_OUTPUT)
+    result.discovered = len(desired_ids)
     for video_id, paths in current_files.items():
         if video_id not in desired_ids:
             print(f"YouTube Music: pruning orphaned track {video_id}")
             _delete_paths(paths)
+    result.success = result.failed == 0
+    if result.failed:
+        result.error = f"{result.failed} YouTube Music download(s) failed"
+    return result
 
 
 def main() -> int:
     _ensure_paths()
+    started = time.monotonic()
     with SYNC_LOCK_FILE.open("a+") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             print("A music sync is already running; skipping this trigger.")
             return 0
-        sync_spotify()
-        sync_ytmusic()
-    return 0
+        _write_run_state(status="running", started_at=_now())
+        results: list[SourceResult] = []
+        try:
+            results.append(sync_spotify())
+            results.append(sync_ytmusic())
+        except Exception as exc:  # noqa: BLE001 - persist and surface unexpected provider failures
+            _write_run_state(
+                status="failed",
+                finished_at=_now(),
+                duration_seconds=time.monotonic() - started,
+                error=str(exc),
+            )
+            print(f"Sync failed unexpectedly: {exc}")
+            return 1
+    configured = [result for result in results if result.configured]
+    failed = [result for result in configured if not result.success]
+    payload = {
+        "status": "failed" if failed else "success",
+        "finished_at": _now(),
+        "duration_seconds": round(time.monotonic() - started, 3),
+        "sources": [
+            {
+                "name": result.name,
+                "configured": result.configured,
+                "success": result.success,
+                "discovered": result.discovered,
+                "downloaded": result.downloaded,
+                "failed": result.failed,
+                "error": result.error,
+            }
+            for result in results
+        ],
+    }
+    _write_run_state(**payload)
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":
