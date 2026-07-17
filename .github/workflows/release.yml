@@ -12,8 +12,45 @@ permissions:
   contents: read
 
 jobs:
+  verify-version:
+    name: Verify tag version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Require exact PEP 621 project version tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          tag = os.environ.get("RELEASE_TAG", "")
+          with Path("pyproject.toml").open("rb") as pyproject_file:
+              project = tomllib.load(pyproject_file).get("project", {})
+          version = project.get("version")
+
+          if not isinstance(version, str) or not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+              raise SystemExit("pyproject.toml must define a stable X.Y.Z project.version")
+          if not re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", tag):
+              raise SystemExit(f"release tag must be vX.Y.Z, got {tag!r}")
+          expected_tag = f"v{version}"
+          if tag != expected_tag:
+              raise SystemExit(
+                  f"release tag {tag!r} does not exactly match PEP 621 project version {version!r}"
+              )
+          print(f"Verified {tag} against pyproject.toml project.version={version}")
+          PY
+
   verify:
     name: Verify release
+    needs: verify-version
     uses: ./.github/workflows/ci.yml
 
   publish:

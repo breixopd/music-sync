@@ -10,7 +10,7 @@ and machine-readable status for homelab automation.
 Release images are published for `linux/amd64` and `linux/arm64`:
 
 ```text
-ghcr.io/breixopd/music-sync:v1.0.0
+ghcr.io/breixopd/music-sync:v1.1.0
 ```
 
 Use a release digest in production. The Homelab Toolkit service plugin owns the
