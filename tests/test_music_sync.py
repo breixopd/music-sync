@@ -29,6 +29,13 @@ sync_worker = importlib.util.module_from_spec(SYNC_SPEC)
 sys.modules[SYNC_SPEC.name] = sync_worker
 SYNC_SPEC.loader.exec_module(sync_worker)
 
+AUTH_PATH = REPO_ROOT / "ytmusic_auth.py"
+AUTH_SPEC = importlib.util.spec_from_file_location("homelab_ytmusic_auth", AUTH_PATH)
+assert AUTH_SPEC is not None and AUTH_SPEC.loader is not None
+ytmusic_auth = importlib.util.module_from_spec(AUTH_SPEC)
+sys.modules[AUTH_SPEC.name] = ytmusic_auth
+AUTH_SPEC.loader.exec_module(ytmusic_auth)
+
 
 def _auth(username: str = "admin", password: str = "pass") -> dict[str, str]:
     encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
@@ -219,6 +226,20 @@ class TestSpotifyFlow:
 
 
 class TestSyncCoordination:
+    def test_ytmusic_auth_file_is_private(self, tmp_path: Path):
+        auth_file = tmp_path / "headers_auth.json"
+
+        def write_auth(*, filepath: str) -> None:
+            Path(filepath).write_text("{}")
+
+        with (
+            patch.object(ytmusic_auth, "AUTH_FILE", auth_file),
+            patch.object(ytmusic_auth, "setup_oauth", side_effect=write_auth),
+        ):
+            ytmusic_auth.main()
+
+        assert auth_file.stat().st_mode & 0o777 == 0o600
+
     def test_unconfigured_sources_do_not_delete_existing_files(self):
         with (
             patch.dict(
