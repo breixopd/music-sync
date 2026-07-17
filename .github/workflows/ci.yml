@@ -47,6 +47,8 @@ jobs:
         run: uv run ruff check .
       - name: Check formatting
         run: uv run ruff format --check .
+      - name: Compile source tree
+        run: uv run python -m compileall -q app.py run.py sync.py spotify_auth.py ytmusic_auth.py tests
       - name: Audit dependencies
         run: |
           uv export --locked --no-dev --no-emit-project --format requirements-txt --output-file requirements-audit.txt

@@ -6,3 +6,7 @@
 tests
 *.pyc
 __pycache__
+*.coverage
+coverage.xml
+dist
+requirements-audit.txt

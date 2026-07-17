@@ -219,6 +219,47 @@ class TestSpotifyFlow:
 
 
 class TestSyncCoordination:
+    def test_unconfigured_sources_do_not_delete_existing_files(self):
+        with (
+            patch.dict(
+                sync_worker.os.environ,
+                {
+                    "MUSIC_SYNC_SPOTIFY_SAVED_TRACKS": "false",
+                    "MUSIC_SYNC_SPOTIFY_PLAYLISTS": "",
+                },
+            ),
+            patch.object(sync_worker, "_spotify_client") as client,
+        ):
+            result = sync_worker.sync_spotify()
+
+        assert result.success is True
+        client.assert_not_called()
+
+    def test_bounded_ytmusic_fetch_does_not_prune(self, tmp_path: Path):
+        auth_file = tmp_path / "headers_auth.json"
+        auth_file.write_text("{}")
+        old_file = tmp_path / "old - title.mp3"
+        old_file.write_text("audio")
+        client = MagicMock()
+        client.get_liked_songs.return_value = {"tracks": [{"videoId": "new"}]}
+        with (
+            patch.object(sync_worker, "YTMUSIC_AUTH_FILE", str(auth_file)),
+            patch.object(sync_worker, "YTMUSIC_OUTPUT", tmp_path),
+            patch.object(sync_worker, "YTMUSIC_FETCH_LIMIT", 1),
+            patch.dict(
+                sync_worker.os.environ,
+                {"MUSIC_SYNC_YTMUSIC_LIKED": "true", "MUSIC_SYNC_YTMUSIC_PLAYLISTS": ""},
+            ),
+            patch.object(sync_worker, "_ytmusic_client", return_value=client),
+            patch.object(sync_worker, "_download_youtube_video", return_value=True),
+            patch.object(sync_worker, "_delete_paths") as delete_paths,
+        ):
+            result = sync_worker.sync_ytmusic()
+
+        assert result.success is True
+        assert result.prune_safe is False
+        delete_paths.assert_not_called()
+
     def test_manual_sync_rejects_duplicate_run(self, client):
         lock = MagicMock()
         lock.acquire.return_value = False

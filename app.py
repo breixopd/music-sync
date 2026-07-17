@@ -239,6 +239,8 @@ def metrics():
 def api_sync():
     """Trigger an immediate sync run asynchronously."""
     if not _sync_lock.acquire(blocking=False):
+        if request.form:
+            return redirect(url_for("index"))
         return {"status": "already_running"}, 409
 
     def _run():
@@ -248,12 +250,15 @@ def api_sync():
             _sync_lock.release()
 
     threading.Thread(target=_run, name="manual-music-sync", daemon=True).start()
+    if request.form:
+        return redirect(url_for("index"), code=303)
     return {"status": "started"}, 202
 
 
 @app.get("/")
 def index():
     heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else "never"
+    run_state = _read_run_state()
     spotify_ready = SPOTIFY_CACHE_PATH.exists()
     ytmusic_ready = YTMUSIC_AUTH_FILE.exists()
     return render_template_string(
@@ -263,6 +268,9 @@ def index():
         spotify_redirect=os.environ.get("SPOTIPY_REDIRECT_URI", "http://localhost:8888/callback"),
         public_url=PUBLIC_URL,
         heartbeat=heartbeat,
+        sync_status=run_state.get("status", "unknown"),
+        sync_error=run_state.get("error"),
+        sync_duration=run_state.get("duration_seconds"),
         music_dir="/music",
         config_dir=str(CONFIG_ROOT),
         auth_enabled=_requires_auth(),
@@ -309,26 +317,51 @@ TEMPLATE = """
 <html>
 <head>
   <meta charset=\"utf-8\">
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">
   <title>Music Sync Setup</title>
   <style>
-    body { font-family: Georgia, serif; margin: 2rem auto; max-width: 900px; line-height: 1.5; color: #1d2a26; }
-    .card { border: 1px solid #d7dfd7; border-radius: 12px; padding: 1rem 1.25rem;
-            margin-bottom: 1rem; background: #fbfcf9; }
+    :root { color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+            color: #17231f; background: #f3f5f0; }
+    body { margin: 0 auto; max-width: 960px; padding: clamp(1.25rem, 4vw, 3rem); line-height: 1.5; }
+    header { display: flex; align-items: end; justify-content: space-between; gap: 1rem; margin-bottom: 2rem; }
+    h1, h2 { letter-spacing: -0.03em; line-height: 1.1; }
+    h1 { margin: 0; font-size: clamp(2rem, 5vw, 3.5rem); }
+    h2 { margin-top: 0; font-size: 1.2rem; }
+    .eyebrow { margin: 0 0 .5rem; color: #60736a; font-size: .75rem; font-weight: 700;
+               letter-spacing: .12em; text-transform: uppercase; }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 1rem; }
+    .card { border: 1px solid #d4ddd3; border-radius: 10px; padding: 1.25rem; margin-bottom: 1rem; background: #fff; }
+    .wide { grid-column: 1 / -1; }
+    .value { font-size: 1.05rem; font-weight: 700; }
+    .muted { color: #60736a; }
     .ok { color: #156f3d; }
     .warn { color: #8a5d00; }
-    code, pre { background: #f2f4ee; padding: 0.15rem 0.3rem; border-radius: 4px; }
-    pre { padding: 0.8rem; overflow-x: auto; }
-    a.button { display: inline-block; background: #234b3b; color: white; padding: 0.6rem 0.9rem;
-               border-radius: 8px; text-decoration: none; }
+    code, pre { background: #eef2ec; padding: .15rem .3rem; border-radius: 4px; }
+    pre { padding: .8rem; overflow-x: auto; white-space: pre-wrap; }
+    a.button, button { display: inline-block; border: 0; background: #234b3b; color: white; padding: .65rem .9rem;
+               border-radius: 6px; text-decoration: none; font: inherit; cursor: pointer; }
+    a.button.secondary { background: #e8eee7; color: #234b3b; }
+    button:focus-visible, a:focus-visible { outline: 3px solid #d58a24; outline-offset: 3px; }
+    @media (max-width: 520px) { header { display: block; } header .button { margin-top: 1rem; } }
   </style>
 </head>
 <body>
-  <h1>Music Sync Setup</h1>
-  <p>This UI shows status, exact OAuth steps, and the commands you need for Spotify and YouTube Music.</p>
+  <header><div><p class=\"eyebrow\">Operations console</p><h1>Music Sync</h1>
+  <p class=\"muted\">Connect providers, inspect the last run, and keep the local library current.</p></div>
+  <form method=\"post\" action=\"{{ url_for('api_sync') }}\">
+    <button type=\"submit\">Run sync now</button>
+  </form></header>
 
-  <div class=\"card\">
+  <div class=\"grid\"><div class=\"card\">
     <h2>Status</h2>
-    <p>Last sync heartbeat: <strong>{{ heartbeat }}</strong></p>
+    <p class=\"value\">Latest run:
+      <span class=\"{{ 'ok' if sync_status == 'success' else 'warn' if sync_status == 'failed' else '' }}\">
+        {{ sync_status }}
+      </span>
+    </p>
+    {% if sync_error %}<p class=\"warn\">{{ sync_error }}</p>{% endif %}
+    <p class=\"muted\">Scheduler heartbeat: <strong>{{ heartbeat }}</strong>
+      {% if sync_duration %} · {{ sync_duration }}s{% endif %}</p>
     <p>Spotify token:
       <strong class=\"{{ 'ok' if spotify_ready else 'warn' }}\">
         {{ 'ready' if spotify_ready else 'missing' }}</strong></p>
@@ -356,7 +389,7 @@ TEMPLATE = """
     <pre>docker compose exec music-sync python /app/ytmusic_auth.py</pre>
   </div>
 
-  <div class=\"card\">
+  <div class=\"card wide\">
     <h2>Current Sync Sources</h2>
     <p>Spotify liked songs: <code>{{ spotify_saved }}</code></p>
     <p>Spotify playlists: <code>{{ spotify_playlists or '(none)' }}</code></p>
@@ -364,7 +397,7 @@ TEMPLATE = """
     <p>YouTube Music playlists: <code>{{ ytmusic_playlists or '(none)' }}</code></p>
     <p>Run an immediate sync:</p>
     <pre>docker compose exec music-sync python /app/sync.py</pre>
-  </div>
+  </div></div>
 </body>
 </html>
 """

@@ -3,8 +3,12 @@ set -eu
 
 container_id="$(
   docker run --detach --rm \
-    --tmpfs /config \
-    --tmpfs /music \
+    --read-only \
+    --cap-drop=ALL \
+    --security-opt=no-new-privileges:true \
+    --tmpfs /config:rw,uid=1000,gid=1000 \
+    --tmpfs /music:rw,uid=1000,gid=1000 \
+    --tmpfs /tmp:rw,noexec,nosuid,size=16m \
     --env MUSIC_SYNC_WEB_USERNAME=admin \
     --env MUSIC_SYNC_WEB_PASSWORD=smoke-test-password \
     music-sync:test

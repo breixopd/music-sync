@@ -8,3 +8,9 @@ dist/
 requirements-audit.txt
 *.egg-info/
 *.py[cod]
+
+# Local provider credentials and runtime state
+config/
+spotipy-token.json
+headers_auth.json
+state/

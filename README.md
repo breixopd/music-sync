@@ -29,7 +29,11 @@ Required configuration:
 
 The container expects persistent `/config` and `/music` mounts. Optional source
 selection and scheduling use the `MUSIC_SYNC_*` variables declared by the
-Homelab Toolkit plugin.
+Homelab Toolkit plugin. The image runs as UID/GID `1000:1000`, so those mounts
+must be writable by that identity.
+
+The complete endpoint, persistence, recovery, and parent-deployment contract is
+documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 
 ## Development
 
@@ -44,6 +48,10 @@ rm requirements-audit.txt
 docker build -t music-sync:test .
 scripts/container-smoke.sh
 ```
+
+The application deliberately reports provider failures instead of pruning on
+partial source data. The scheduler keeps serving the UI, records the failed
+run in `/config/state/run.json`, and retries after a bounded backoff.
 
 Every release tag builds a multi-architecture image, publishes immutable SHA and
 release tags to GHCR, and attaches a GitHub artifact attestation.

@@ -58,6 +58,7 @@ class SourceResult:
     discovered: int = 0
     downloaded: int = 0
     failed: int = 0
+    prune_safe: bool = True
     error: str | None = None
 
 
@@ -202,23 +203,26 @@ def _download_spotify_track(track: SpotifyTrack) -> bool:
 
 
 def sync_spotify() -> SourceResult:
+    saved_enabled = os.environ.get("MUSIC_SYNC_SPOTIFY_SAVED_TRACKS", "false").lower() == "true"
+    playlist_refs = _split_csv(os.environ.get("MUSIC_SYNC_SPOTIFY_PLAYLISTS", ""))
+    if not saved_enabled and not playlist_refs:
+        return SourceResult("spotify", success=True)
     sp = _spotify_client()
     if sp is None:
-        configured = bool(SPOTIPY_CLIENT_ID and SPOTIPY_CLIENT_SECRET)
         return SourceResult(
             "spotify",
-            configured=configured,
-            error="OAuth token is not available" if configured else None,
+            configured=True,
+            error="Spotify credentials or OAuth token are not available",
         )
 
     result = SourceResult("spotify", configured=True)
     desired: dict[str, SpotifyTrack] = {}
 
-    if os.environ.get("MUSIC_SYNC_SPOTIFY_SAVED_TRACKS", "false").lower() == "true":
+    if saved_enabled:
         for track in _iter_spotify_saved_tracks(sp):
             desired[track.track_id] = track
 
-    for playlist_ref in _split_csv(os.environ.get("MUSIC_SYNC_SPOTIFY_PLAYLISTS", "")):
+    for playlist_ref in playlist_refs:
         for track in _iter_spotify_playlist_tracks(sp, playlist_ref):
             desired[track.track_id] = track
 
@@ -289,16 +293,23 @@ def _download_youtube_video(video_id: str) -> bool:
 
 
 def sync_ytmusic() -> SourceResult:
+    liked_enabled = os.environ.get("MUSIC_SYNC_YTMUSIC_LIKED", "false").lower() == "true"
+    playlist_refs = _split_csv(os.environ.get("MUSIC_SYNC_YTMUSIC_PLAYLISTS", ""))
+    if not liked_enabled and not playlist_refs:
+        return SourceResult("ytmusic", success=True)
     client = _ytmusic_client()
     if client is None:
-        return SourceResult("ytmusic", configured=Path(YTMUSIC_AUTH_FILE).exists(), error="auth file is not available")
+        return SourceResult("ytmusic", configured=True, error="YouTube Music auth file is not available")
 
     result = SourceResult("ytmusic", configured=True)
     desired_ids: set[str] = set()
     current_files = _prefixed_audio_files(YTMUSIC_OUTPUT)
+    prune_safe = True
 
-    if os.environ.get("MUSIC_SYNC_YTMUSIC_LIKED", "false").lower() == "true":
+    if liked_enabled:
         liked = client.get_liked_songs(limit=YTMUSIC_FETCH_LIMIT)
+        if len(liked.get("tracks", liked.get("contents", []))) >= YTMUSIC_FETCH_LIMIT:
+            prune_safe = False
         for entry in liked.get("tracks", liked.get("contents", [])):
             video_id = entry.get("videoId")
             if video_id:
@@ -313,9 +324,13 @@ def sync_ytmusic() -> SourceResult:
                     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                         result.failed += 1
 
-    for playlist_ref in _split_csv(os.environ.get("MUSIC_SYNC_YTMUSIC_PLAYLISTS", "")):
+    for playlist_ref in playlist_refs:
         playlist = client.get_playlist(_ytmusic_playlist_id(playlist_ref), limit=YTMUSIC_FETCH_LIMIT)
-        for entry in playlist.get("tracks", []):
+        tracks = playlist.get("tracks", [])
+        track_count = playlist.get("trackCount")
+        if len(tracks) >= YTMUSIC_FETCH_LIMIT or (isinstance(track_count, int) and track_count > len(tracks)):
+            prune_safe = False
+        for entry in tracks:
             video_id = entry.get("videoId")
             if video_id:
                 desired_ids.add(video_id)
@@ -330,10 +345,12 @@ def sync_ytmusic() -> SourceResult:
                         result.failed += 1
 
     result.discovered = len(desired_ids)
-    for video_id, paths in current_files.items():
-        if video_id not in desired_ids:
-            print(f"YouTube Music: pruning orphaned track {video_id}")
-            _delete_paths(paths)
+    result.prune_safe = prune_safe
+    if prune_safe:
+        for video_id, paths in current_files.items():
+            if video_id not in desired_ids:
+                print(f"YouTube Music: pruning orphaned track {video_id}")
+                _delete_paths(paths)
     result.success = result.failed == 0
     if result.failed:
         result.error = f"{result.failed} YouTube Music download(s) failed"
@@ -377,6 +394,7 @@ def main() -> int:
                 "discovered": result.discovered,
                 "downloaded": result.downloaded,
                 "failed": result.failed,
+                "prune_safe": result.prune_safe,
                 "error": result.error,
             }
             for result in results
