@@ -97,6 +97,17 @@ class TestSyncHealth:
         assert resp.status_code == 200
         assert resp.json["sync_interval_minutes"] == 60
 
+    def test_status_caps_interval_from_unbounded_environment(self, client):
+        with (
+            patch.object(sync_app, "WEB_USERNAME", "admin"),
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+            patch.dict(sync_app.os.environ, {"MUSIC_SYNC_INTERVAL_MINUTES": "999999"}),
+        ):
+            resp = client.get("/api/status", headers=_auth())
+
+        assert resp.status_code == 200
+        assert resp.json["sync_interval_minutes"] == 1440
+
     def test_metrics_are_scrapable_without_admin_credentials(self, client):
         with patch.object(sync_app, "WEB_PASSWORD", ""):
             response = client.get("/metrics")

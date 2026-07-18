@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 SYNC_SCRIPT = Path(__file__).resolve().with_name("sync.py")
+MAX_INTERVAL_MINUTES = 1440
 
 
 def heartbeat() -> None:
@@ -23,7 +24,7 @@ def heartbeat() -> None:
 
 def _interval_minutes(raw: str | None) -> int:
     try:
-        return max(1, int(raw or "60"))
+        return min(MAX_INTERVAL_MINUTES, max(1, int(raw or "60")))
     except (TypeError, ValueError):
         return 60
 

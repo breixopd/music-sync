@@ -8,6 +8,7 @@ def test_invalid_interval_uses_safe_default() -> None:
     assert run._interval_minutes("invalid") == 60
     assert run._interval_minutes("0") == 1
     assert run._interval_minutes("15") == 15
+    assert run._interval_minutes("999999") == 1440
 
 
 def test_failure_backoff_is_bounded() -> None:

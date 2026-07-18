@@ -51,11 +51,12 @@ def _split_csv(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
-def _positive_int(value: str | None, default: int) -> int:
+def _positive_int(value: str | None, default: int, maximum: int | None = None) -> int:
     try:
-        return max(1, int(value or default))
+        parsed = max(1, int(value or default))
     except (TypeError, ValueError):
         return default
+    return min(parsed, maximum) if maximum is not None else parsed
 
 
 def _count_audio_files(root: Path) -> int:
@@ -159,7 +160,7 @@ def health():
 def api_status():
     """Status endpoint consumed by the homelab toolkit MusicSyncClient."""
     heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else ""
-    interval_minutes = _positive_int(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES"), 60)
+    interval_minutes = _positive_int(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES"), 60, maximum=1440)
     heartbeat_age = _heartbeat_age_seconds(heartbeat)
     run_state = _read_run_state()
     spotify_ready = SPOTIFY_CACHE_PATH.exists()
