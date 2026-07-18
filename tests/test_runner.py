@@ -1,3 +1,4 @@
+import sys
 from unittest.mock import MagicMock, patch
 
 import run
@@ -25,7 +26,7 @@ def test_runner_exits_when_web_process_dies() -> None:
     with (
         patch.object(run.Path, "mkdir"),
         patch.object(run, "heartbeat"),
-        patch.object(run.subprocess, "Popen", side_effect=[web, worker]),
+        patch.object(run.subprocess, "Popen", side_effect=[web, worker]) as popen,
         patch.object(run.time, "sleep"),
         patch.object(run.signal, "signal"),
     ):
@@ -33,3 +34,4 @@ def test_runner_exits_when_web_process_dies() -> None:
 
     assert result == 17
     worker.terminate.assert_called_once()
+    assert popen.call_args_list[1].args[0] == [sys.executable, str(run.SYNC_SCRIPT)]

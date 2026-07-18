@@ -294,6 +294,25 @@ class TestSyncCoordination:
         assert response.status_code == 409
         assert response.json == {"status": "already_running"}
 
+    def test_manual_sync_uses_worker_next_to_application(self, client):
+        class InlineThread:
+            def __init__(self, *, target, name, daemon):
+                self.target = target
+
+            def start(self):
+                self.target()
+
+        with (
+            patch.object(sync_app, "WEB_USERNAME", "admin"),
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+            patch.object(sync_app.threading, "Thread", InlineThread),
+            patch.object(sync_app.subprocess, "run") as run,
+        ):
+            response = client.post("/api/sync", headers=_auth())
+
+        assert response.status_code == 202
+        run.assert_called_once_with([sys.executable, str(sync_app.SYNC_SCRIPT)], check=False)
+
     def test_state_write_is_atomic(self, tmp_path: Path):
         state_file = tmp_path / "state.json"
 

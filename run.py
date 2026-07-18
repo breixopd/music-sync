@@ -14,6 +14,8 @@ import time
 from datetime import UTC, datetime
 from pathlib import Path
 
+SYNC_SCRIPT = Path(__file__).resolve().with_name("sync.py")
+
 
 def heartbeat() -> None:
     Path("/tmp/music-sync-heartbeat").write_text(datetime.now(UTC).isoformat())
@@ -95,7 +97,7 @@ def main() -> int:
                 return web.returncode or 1
 
             heartbeat()
-            worker = subprocess.Popen([sys.executable, "/app/sync.py"])  # noqa: S603
+            worker = subprocess.Popen([sys.executable, str(SYNC_SCRIPT)])  # noqa: S603
             while worker.poll() is None and not stop_requested:
                 if web.poll() is not None:
                     return web.returncode or 1

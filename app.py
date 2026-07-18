@@ -39,6 +39,7 @@ app.config.update(
 CONFIG_ROOT = Path("/config")
 SPOTIFY_CACHE_PATH = Path(os.environ.get("SPOTIFY_CACHE_PATH", "/config/spotify/spotipy-token.json"))
 YTMUSIC_AUTH_FILE = Path(os.environ.get("YTMUSIC_AUTH_FILE", "/config/ytmusic/headers_auth.json"))
+SYNC_SCRIPT = Path(__file__).resolve().with_name("sync.py")
 HEARTBEAT_FILE = Path("/tmp/music-sync-heartbeat")
 RUN_STATE_FILE = CONFIG_ROOT / "state" / "run.json"
 PUBLIC_URL = os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "")
@@ -245,7 +246,7 @@ def api_sync():
 
     def _run():
         try:
-            subprocess.run([sys.executable, "/app/sync.py"], check=False)  # noqa: S603
+            subprocess.run([sys.executable, str(SYNC_SCRIPT)], check=False)  # noqa: S603
         finally:
             _sync_lock.release()
 
