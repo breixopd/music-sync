@@ -2,6 +2,7 @@
 
 import base64
 import importlib.util
+import json
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -346,3 +347,19 @@ class TestSyncCoordination:
         assert result == 0
         spotify.assert_not_called()
         ytmusic.assert_not_called()
+
+    def test_unexpected_provider_errors_do_not_persist_exception_details(self, tmp_path: Path):
+        lock_file = tmp_path / "sync.lock"
+        state_file = tmp_path / "run.json"
+        with (
+            patch.object(sync_worker, "SYNC_LOCK_FILE", lock_file),
+            patch.object(sync_worker, "RUN_STATE_FILE", state_file),
+            patch.object(sync_worker, "_ensure_paths"),
+            patch.object(sync_worker, "sync_spotify", side_effect=RuntimeError("access token: super-secret")),
+        ):
+            result = sync_worker.main()
+
+        assert result == 1
+        state = json.loads(state_file.read_text())
+        assert state["error"] == "unexpected sync failure (RuntimeError)"
+        assert "super-secret" not in state_file.read_text()

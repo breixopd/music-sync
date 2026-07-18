@@ -372,13 +372,14 @@ def main() -> int:
             results.append(sync_spotify())
             results.append(sync_ytmusic())
         except Exception as exc:  # noqa: BLE001 - persist and surface unexpected provider failures
+            error_summary = f"unexpected sync failure ({type(exc).__name__})"
             _write_run_state(
                 status="failed",
                 finished_at=_now(),
                 duration_seconds=time.monotonic() - started,
-                error=str(exc),
+                error=error_summary,
             )
-            print(f"Sync failed unexpectedly: {exc}")
+            print(f"Sync failed unexpectedly ({type(exc).__name__}).")
             return 1
     configured = [result for result in results if result.configured]
     failed = [result for result in configured if not result.success]
