@@ -76,6 +76,34 @@ class TestSyncHealth:
             resp = client.get("/", headers=_auth())
             assert resp.status_code == 200
 
+    def test_root_accepts_authenticated_user_from_declared_trusted_proxy(self, client):
+        with (
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+            patch.object(sync_app, "TRUSTED_AUTH_HEADER", "Remote-User"),
+            patch.object(sync_app, "TRUSTED_PROXY_NETWORKS", (sync_app.ipaddress.ip_network("10.10.10.10/32"),)),
+        ):
+            response = client.get(
+                "/",
+                headers={"Remote-User": "owner"},
+                environ_base={"REMOTE_ADDR": "10.10.10.10"},
+            )
+
+        assert response.status_code == 200
+
+    def test_root_rejects_forged_authenticated_user_from_untrusted_source(self, client):
+        with (
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+            patch.object(sync_app, "TRUSTED_AUTH_HEADER", "Remote-User"),
+            patch.object(sync_app, "TRUSTED_PROXY_NETWORKS", (sync_app.ipaddress.ip_network("10.10.10.10/32"),)),
+        ):
+            response = client.get(
+                "/",
+                headers={"Remote-User": "owner"},
+                environ_base={"REMOTE_ADDR": "10.10.10.11"},
+            )
+
+        assert response.status_code == 401
+
     def test_authenticated_responses_set_security_headers(self, client):
         with (
             patch.object(sync_app, "WEB_USERNAME", "admin"),

@@ -25,6 +25,8 @@ Required configuration:
 | `SPOTIPY_CLIENT_SECRET` | Spotify application client secret |
 | `SPOTIPY_REDIRECT_URI` | Exact Spotify OAuth callback URL |
 | `MUSIC_SYNC_WEB_USERNAME` | Administration username |
+| `MUSIC_SYNC_TRUSTED_AUTH_HEADER` | Optional reverse-proxy identity header |
+| `MUSIC_SYNC_TRUSTED_PROXY_CIDRS` | Comma-separated source CIDRs allowed to supply the identity header |
 | `MUSIC_SYNC_WEB_PASSWORD` | Administration password |
 
 The container expects persistent `/config` and `/music` mounts. Optional source

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import hmac
+import ipaddress
 import json
 import os
 import secrets
@@ -22,6 +23,12 @@ from spotipy.oauth2 import SpotifyOAuth  # pyright: ignore[reportMissingImports]
 
 WEB_USERNAME = os.environ.get("MUSIC_SYNC_WEB_USERNAME", "music-admin")
 WEB_PASSWORD = os.environ.get("MUSIC_SYNC_WEB_PASSWORD", "")
+TRUSTED_AUTH_HEADER = os.environ.get("MUSIC_SYNC_TRUSTED_AUTH_HEADER", "").strip()
+TRUSTED_PROXY_NETWORKS = tuple(
+    ipaddress.ip_network(value.strip(), strict=False)
+    for value in os.environ.get("MUSIC_SYNC_TRUSTED_PROXY_CIDRS", "").split(",")
+    if value.strip()
+)
 app = Flask(__name__)
 # The explicit secret is preferred. Falling back to the already-required admin
 # password keeps sessions stable across restarts without adding a new deployment
@@ -105,6 +112,18 @@ def _unauthorized() -> Response:
     )
 
 
+def _trusted_proxy_user() -> str:
+    if not TRUSTED_AUTH_HEADER or not TRUSTED_PROXY_NETWORKS:
+        return ""
+    try:
+        remote_address = ipaddress.ip_address(request.remote_addr or "")
+    except ValueError:
+        return ""
+    if not any(remote_address in network for network in TRUSTED_PROXY_NETWORKS):
+        return ""
+    return request.headers.get(TRUSTED_AUTH_HEADER, "").strip()[:254]
+
+
 @app.before_request
 def protect_setup_ui():
     # Missing generated credentials are a deployment error, never an instruction
@@ -114,6 +133,8 @@ def protect_setup_ui():
     if not _requires_auth():
         return Response("Setup UI credentials are not configured", status=503)
     if request.path == "/health":
+        return None
+    if _trusted_proxy_user():
         return None
 
     auth = request.authorization
