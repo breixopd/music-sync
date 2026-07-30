@@ -35,8 +35,8 @@ while [ "${attempt}" -lt 30 ]; do
       fi
 
       contract="$(
-        docker exec "${container_id}" \
-          curl -fsS -u admin:smoke-test-password http://localhost:8845/api/contract
+        docker exec "${container_id}" sh -ceu \
+          'curl -fsS --user "$MUSIC_SYNC_WEB_USERNAME:$MUSIC_SYNC_WEB_PASSWORD" http://localhost:8845/api/contract'
       )"
       printf '%s' "${contract}" | docker exec -i "${container_id}" python -c '
 import json, sys
@@ -50,8 +50,8 @@ assert required.issubset(set(contract.get("capabilities", [])))
 '
 
       status_doc="$(
-        docker exec "${container_id}" \
-          curl -fsS -u admin:smoke-test-password http://localhost:8845/api/status
+        docker exec "${container_id}" sh -ceu \
+          'curl -fsS --user "$MUSIC_SYNC_WEB_USERNAME:$MUSIC_SYNC_WEB_PASSWORD" http://localhost:8845/api/status'
       )"
       printf '%s' "${status_doc}" | docker exec -i "${container_id}" python -c '
 import json, sys
