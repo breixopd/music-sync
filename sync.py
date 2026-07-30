@@ -429,6 +429,7 @@ def sync_ytmusic() -> SourceResult:
             if prune_safe and video_id in managed and video_id not in desired_ids:
                 print(f"YouTube Music: pruning orphaned track {video_id}")
                 _delete_paths(paths)
+    result.prune_safe = prune_safe
     if prune_safe and result.failed == 0:
         _save_json_list(YTMUSIC_STATE_FILE, desired_ids)
     result.success = result.failed == 0
