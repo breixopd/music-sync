@@ -8,6 +8,7 @@ the container and owns routing, secrets, metrics scraping, and update policy.
 | Method | Path | Authentication | Meaning |
 | --- | --- | --- | --- |
 | GET | `/health` | none | Process health. Returns `200` only when the admin password is configured. |
+| GET | `/api/contract` | HTTP Basic | Versioned service identity and capability contract for parent integrations. |
 | GET | `/api/status` | HTTP Basic | JSON status consumed by the service plugin. Existing fields remain stable; `sync_status`, run timestamps, duration, and per-source outcomes are additive. |
 | POST | `/api/sync` | HTTP Basic | Starts one asynchronous sync. Returns `202 {"status":"started"}` or `409 {"status":"already_running"}`. |
 | GET | `/metrics` | none | Prometheus text exposition. It contains no credentials or provider payloads. |
@@ -26,9 +27,11 @@ atomic run state. `/music` stores the two output libraries. The image runs as
 UID/GID `1000:1000`; both mounts must be writable by that identity. The parent
 deployment must set ownership or mount options accordingly.
 
-The worker never prunes a provider library after a provider fetch fails. A
-successful fetch produces a durable `config/state/run.json` outcome and only
-then is the desired set eligible for orphan pruning. Downloads are retried on
+Pruning is opt-in (`MUSIC_SYNC_PRUNE=true`). The worker records managed track
+IDs and only considers those IDs for deletion; files not previously managed by
+the worker are never removed. A successful complete fetch produces a durable
+`config/state/run.json` outcome and only then is the desired set eligible for
+orphan pruning. Downloads are retried on
 the next run; failed runs are visible in `/api/status` and metrics.
 
 ## Configuration
@@ -48,6 +51,11 @@ Optional variables include `MUSIC_SYNC_WEB_PUBLIC_URL`,
 `MUSIC_SYNC_YTMUSIC_LIMIT`, `MUSIC_SYNC_SPOTIFY_SAVED_TRACKS`,
 `MUSIC_SYNC_SPOTIFY_PLAYLISTS`, `MUSIC_SYNC_YTMUSIC_LIKED`, and
 `MUSIC_SYNC_YTMUSIC_PLAYLISTS`.
+Set `MUSIC_SYNC_PRUNE=true` to enable managed-file pruning.
+Browser requests carrying an `Origin` header must match the service host; API
+clients without an `Origin` header remain supported. Manual sync acquires the
+same process lock as the scheduler before returning `202`, and returns `409`
+when a run is already active.
 
 ## Release and rollback
 

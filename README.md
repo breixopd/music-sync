@@ -34,6 +34,11 @@ selection and scheduling use the `MUSIC_SYNC_*` variables declared by the
 Homelab Toolkit plugin. The image runs as UID/GID `1000:1000`, so those mounts
 must be writable by that identity.
 
+Pruning is disabled by default. Set `MUSIC_SYNC_PRUNE=true` only after an
+initial successful sync; managed track IDs ensure the worker never deletes
+files it did not previously create. Standalone integrations can inspect the
+authenticated `GET /api/contract` version and capability contract.
+
 The complete endpoint, persistence, recovery, and parent-deployment contract is
 documented in [docs/OPERATIONS.md](docs/OPERATIONS.md).
 

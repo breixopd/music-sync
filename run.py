@@ -19,7 +19,10 @@ MAX_INTERVAL_MINUTES = 1440
 
 
 def heartbeat() -> None:
-    Path("/tmp/music-sync-heartbeat").write_text(datetime.now(UTC).isoformat())
+    destination = Path("/tmp/music-sync-heartbeat")
+    temporary = destination.with_suffix(".tmp")
+    temporary.write_text(datetime.now(UTC).isoformat())
+    os.replace(temporary, destination)
 
 
 def _interval_minutes(raw: str | None) -> int:

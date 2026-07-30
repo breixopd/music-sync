@@ -145,6 +145,31 @@ class TestSyncHealth:
         assert b"music_sync_up 1" in response.data
         assert response.mimetype == "text/plain"
 
+    def test_api_contract_is_stable_without_provider_credentials(self, client):
+        with patch.object(sync_app, "WEB_PASSWORD", ""):
+            response = client.get("/api/contract")
+
+        assert response.status_code == 503
+
+        with patch.object(sync_app, "WEB_USERNAME", "admin"), patch.object(sync_app, "WEB_PASSWORD", "pass"):
+            response = client.get("/api/contract", headers=_auth())
+        assert response.status_code == 200
+        assert response.json["service"] == "music-sync"
+        contract = response.json["integration_contract"]
+        assert contract["version"] == 1
+        assert contract["compatibility"] == "1.x"
+        assert "manual-sync" in contract["capabilities"]
+
+    def test_status_tolerates_heartbeat_read_error(self, client):
+        with (
+            patch.object(sync_app, "WEB_USERNAME", "admin"),
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+            patch.object(sync_app, "HEARTBEAT_FILE", Path("/path/that/does/not/exist")),
+        ):
+            response = client.get("/api/status", headers=_auth())
+        assert response.status_code == 200
+        assert response.json["last_sync"] == ""
+
     def test_status_includes_persisted_run_state(self, client, tmp_path: Path):
         state_file = tmp_path / "run.json"
         state_file.write_text('{"status": "failed", "error": "provider unavailable"}')
@@ -234,7 +259,8 @@ class TestSpotifyFlow:
         log_exception.assert_called_once()
 
     def test_spotify_track_download_uses_yt_dlp_without_web_stack(self):
-        track = sync_worker.SpotifyTrack(track_id="track-1", title="Example Song", artists="Example Artist")
+        track_id = "4uLU6hMCjMI75M1A2tKUQC"
+        track = sync_worker.SpotifyTrack(track_id=track_id, title="Example Song", artists="Example Artist")
 
         with patch.object(sync_worker.subprocess, "run") as run:
             sync_worker._download_spotify_track(track)
@@ -250,7 +276,7 @@ class TestSpotifyFlow:
             "--embed-thumbnail",
             "--embed-metadata",
             "--output",
-            str(sync_worker.SPOTIFY_OUTPUT / "track-1 - %(title)s.%(ext)s"),
+            str(sync_worker.SPOTIFY_OUTPUT / f"{track_id} - %(title)s.%(ext)s"),
             "ytsearch1:Example Artist - Example Song official audio",
         ]
         assert run.call_args.kwargs == {"check": True, "timeout": 900}
@@ -260,9 +286,17 @@ class TestSpotifyFlow:
         assert sync_worker._spotify_track({"track": None}) is None
 
         track = sync_worker._spotify_track(
-            {"track": {"id": "id", "name": "Title", "artists": [{"name": "Artist"}, {"name": "Guest"}]}}
+            {
+                "track": {
+                    "id": "4uLU6hMCjMI75M1A2tKUQC",
+                    "name": "Title",
+                    "artists": [{"name": "Artist"}, {"name": "Guest"}],
+                }
+            }
         )
-        assert track == sync_worker.SpotifyTrack(track_id="id", title="Title", artists="Artist, Guest")
+        assert track == sync_worker.SpotifyTrack(
+            track_id="4uLU6hMCjMI75M1A2tKUQC", title="Title", artists="Artist, Guest"
+        )
 
 
 class TestSyncCoordination:
@@ -334,6 +368,27 @@ class TestSyncCoordination:
         assert response.status_code == 409
         assert response.json == {"status": "already_running"}
 
+    def test_manual_sync_rejects_cross_origin_request(self, client):
+        with (
+            patch.object(sync_app, "WEB_USERNAME", "admin"),
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+        ):
+            response = client.post("/api/sync", headers={**_auth(), "Origin": "https://evil.example"})
+        assert response.status_code == 403
+
+    def test_manual_sync_accepts_configured_public_origin(self, client):
+        with (
+            patch.object(sync_app, "WEB_USERNAME", "admin"),
+            patch.object(sync_app, "WEB_PASSWORD", "pass"),
+            patch.object(sync_app, "PUBLIC_URL", "https://music-sync.example.test"),
+            patch.object(sync_app, "_acquire_worker_lock", return_value=None),
+        ):
+            response = client.post(
+                "/api/sync",
+                headers={**_auth(), "Origin": "https://music-sync.example.test"},
+            )
+        assert response.status_code == 409
+
     def test_manual_sync_uses_worker_next_to_application(self, client):
         class InlineThread:
             def __init__(self, *, target, name, daemon):
@@ -347,11 +402,15 @@ class TestSyncCoordination:
             patch.object(sync_app, "WEB_PASSWORD", "pass"),
             patch.object(sync_app.threading, "Thread", InlineThread),
             patch.object(sync_app.subprocess, "run") as run,
+            patch.object(sync_app, "_acquire_worker_lock", return_value=MagicMock()),
         ):
             response = client.post("/api/sync", headers=_auth())
 
         assert response.status_code == 202
-        run.assert_called_once_with([sys.executable, str(sync_app.SYNC_SCRIPT)], check=False)
+        assert run.call_args.args[0] == [sys.executable, str(sync_app.SYNC_SCRIPT)]
+        assert run.call_args.kwargs["check"] is False
+        assert "MUSIC_SYNC_INTERNAL_LOCK_FD" in run.call_args.kwargs["env"]
+        assert run.call_args.kwargs["pass_fds"]
 
     def test_state_write_is_atomic(self, tmp_path: Path):
         state_file = tmp_path / "state.json"
@@ -389,5 +448,5 @@ class TestSyncCoordination:
 
         assert result == 1
         state = json.loads(state_file.read_text())
-        assert state["error"] == "unexpected sync failure (RuntimeError)"
+        assert state["error"] == "unexpected provider failure (RuntimeError)"
         assert "super-secret" not in state_file.read_text()

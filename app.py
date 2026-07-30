@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import fcntl
 import hmac
 import ipaddress
 import json
@@ -30,11 +31,9 @@ TRUSTED_PROXY_NETWORKS = tuple(
     if value.strip()
 )
 app = Flask(__name__)
-# The explicit secret is preferred. Falling back to the already-required admin
-# password keeps sessions stable across restarts without adding a new deployment
-# variable to the homelab contract. A random fallback is only for the already
-# fail-closed, unauthenticated development state.
-app.secret_key = os.environ.get("MUSIC_SYNC_WEB_SECRET") or WEB_PASSWORD or secrets.token_hex(32)
+# The explicit secret is preferred. A random fallback keeps the application
+# fail-closed when an operator has not configured a persistent deployment key.
+app.secret_key = os.environ.get("MUSIC_SYNC_WEB_SECRET") or secrets.token_hex(32)
 app.config.update(
     MAX_CONTENT_LENGTH=64 * 1024,
     SESSION_COOKIE_HTTPONLY=True,
@@ -52,6 +51,7 @@ RUN_STATE_FILE = CONFIG_ROOT / "state" / "run.json"
 PUBLIC_URL = os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "")
 AUDIO_EXTENSIONS = ("*.mp3", "*.opus", "*.m4a", "*.ogg", "*.webm")
 _sync_lock = threading.Lock()
+API_CONTRACT_VERSION = "1"
 
 
 def _split_csv(value: str) -> list[str]:
@@ -93,6 +93,28 @@ def _read_run_state() -> dict[str, object]:
     except (OSError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def _read_heartbeat(default: str = "") -> str:
+    try:
+        return HEARTBEAT_FILE.read_text().strip()
+    except OSError:
+        return default
+
+
+def _acquire_worker_lock():
+    lock_file = CONFIG_ROOT / "state" / "sync.lock"
+    try:
+        lock_file.parent.mkdir(parents=True, exist_ok=True)
+        handle = lock_file.open("a+")
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return handle
+    except (BlockingIOError, OSError):
+        try:
+            handle.close()
+        except (UnboundLocalError, OSError):
+            pass
+        return None
 
 
 def _metric(name: str, value: object, help_text: str, metric_type: str = "gauge") -> str:
@@ -177,10 +199,23 @@ def health():
     return {"status": "ok"}
 
 
+@app.get("/api/contract")
+def api_contract():
+    """Versioned integration contract for standalone and Homelab consumers."""
+    return {
+        "service": "music-sync",
+        "integration_contract": {
+            "version": int(API_CONTRACT_VERSION),
+            "compatibility": f"{API_CONTRACT_VERSION}.x",
+            "capabilities": ["manual-sync", "metrics", "provider-authorization", "status"],
+        },
+    }
+
+
 @app.get("/api/status")
 def api_status():
     """Status endpoint consumed by the homelab toolkit MusicSyncClient."""
-    heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else ""
+    heartbeat = _read_heartbeat()
     interval_minutes = _positive_int(os.environ.get("MUSIC_SYNC_INTERVAL_MINUTES"), 60, maximum=1440)
     heartbeat_age = _heartbeat_age_seconds(heartbeat)
     run_state = _read_run_state()
@@ -237,7 +272,7 @@ def metrics():
     success = 1 if status == "success" else 0
     running = 1 if status == "running" else 0
     failed = 1 if status == "failed" else 0
-    heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else ""
+    heartbeat = _read_heartbeat()
     age = _heartbeat_age_seconds(heartbeat)
     lines = [
         _metric("music_sync_up", 1, "Whether the web process is serving requests."),
@@ -261,15 +296,32 @@ def metrics():
 @app.post("/api/sync")
 def api_sync():
     """Trigger an immediate sync run asynchronously."""
+    origin = request.headers.get("Origin")
+    allowed_origin = (PUBLIC_URL or request.host_url).rstrip("/")
+    if origin == "null" or (origin and origin.rstrip("/") != allowed_origin):
+        return {"status": "forbidden"}, 403
+    worker_lock = _acquire_worker_lock()
+    if worker_lock is None:
+        return {"status": "already_running"}, 409
     if not _sync_lock.acquire(blocking=False):
+        try:
+            fcntl.flock(worker_lock, fcntl.LOCK_UN)
+        finally:
+            worker_lock.close()
         if request.form:
             return redirect(url_for("index"))
         return {"status": "already_running"}, 409
 
     def _run():
         try:
-            subprocess.run([sys.executable, str(SYNC_SCRIPT)], check=False)  # noqa: S603
+            env = {**os.environ, "MUSIC_SYNC_INTERNAL_LOCK_FD": str(worker_lock.fileno())}
+            subprocess.run([sys.executable, str(SYNC_SCRIPT)], check=False, env=env, pass_fds=(worker_lock.fileno(),))  # noqa: S603
         finally:
+            try:
+                fcntl.flock(worker_lock, fcntl.LOCK_UN)
+            except (OSError, TypeError):
+                pass
+            worker_lock.close()
             _sync_lock.release()
 
     threading.Thread(target=_run, name="manual-music-sync", daemon=True).start()
@@ -280,7 +332,7 @@ def api_sync():
 
 @app.get("/")
 def index():
-    heartbeat = HEARTBEAT_FILE.read_text().strip() if HEARTBEAT_FILE.exists() else "never"
+    heartbeat = _read_heartbeat("never")
     run_state = _read_run_state()
     spotify_ready = SPOTIFY_CACHE_PATH.exists()
     ytmusic_ready = YTMUSIC_AUTH_FILE.exists()
