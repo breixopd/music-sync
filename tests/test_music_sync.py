@@ -300,6 +300,40 @@ class TestSpotifyFlow:
 
 
 class TestSyncCoordination:
+    def test_standalone_compose_is_pinned_and_localhost_bound(self):
+        compose = (REPO_ROOT / "compose.standalone.yaml").read_text()
+
+        assert "ghcr.io/breixopd/music-sync:v1.2.0" in compose
+        assert '"127.0.0.1:8845:8845"' in compose
+        assert "music_sync_config:/config" in compose
+        assert "music_sync_music:/music" in compose
+
+    def test_audio_index_scans_directory_once_and_groups_supported_suffixes(self, tmp_path: Path):
+        (tmp_path / "spotify-id - title.mp3").write_text("audio")
+        (tmp_path / "youtube-id - title.webm").write_text("audio")
+        (tmp_path / "ignored.txt").write_text("not audio")
+
+        indexed = sync_worker._prefixed_audio_files(tmp_path)
+
+        assert set(indexed) == {"spotify-id", "youtube-id"}
+        assert indexed["spotify-id"][0].name.endswith(".mp3")
+        assert indexed["youtube-id"][0].name.endswith(".webm")
+
+    def test_verified_download_is_reused_by_in_memory_index(self, tmp_path: Path):
+        indexed: dict[str, list[Path]] = {}
+
+        sync_worker._index_downloaded_files(indexed, "spotify-id")
+
+        assert sync_worker._audio_file_exists(tmp_path, "spotify-id", indexed)
+
+    def test_audio_count_cache_invalidates_when_directory_changes(self, tmp_path: Path):
+        with patch.object(sync_app, "_audio_count_cache", {}):
+            assert sync_app._count_audio_files(tmp_path) == 0
+            (tmp_path / "track.mp3").write_text("audio")
+            assert sync_app._count_audio_files(tmp_path) == 1
+            (tmp_path / "track.ogg").write_text("audio")
+            assert sync_app._count_audio_files(tmp_path) == 2
+
     def test_ytmusic_auth_file_is_private(self, tmp_path: Path):
         auth_file = tmp_path / "headers_auth.json"
 

@@ -10,12 +10,39 @@ and machine-readable status for homelab automation.
 Release images are published for `linux/amd64` and `linux/arm64`:
 
 ```text
-ghcr.io/breixopd/music-sync:v1.1.0
+ghcr.io/breixopd/music-sync:v1.2.0
 ```
 
 Use a release digest in production. The Homelab Toolkit service plugin owns the
 deployment configuration, secrets, routing, health checks, metrics, and update
-rollout.
+rollout when deployed there. A runnable standalone Compose example is provided
+in [`compose.standalone.yaml`](compose.standalone.yaml).
+
+### Standalone Compose
+
+The example binds the UI to localhost and keeps `/config` and `/music` in named
+volumes. Create a `.env` beside the file with at least:
+
+```dotenv
+MUSIC_SYNC_WEB_PASSWORD=replace-with-a-long-random-password
+MUSIC_SYNC_WEB_SECRET=replace-with-a-long-random-session-secret
+```
+
+Start it with:
+
+```bash
+docker compose -f compose.standalone.yaml up -d
+docker compose -f compose.standalone.yaml exec music-sync python /app/ytmusic_auth.py
+```
+
+Open `http://localhost:8845/` for setup. For Spotify, register the exact
+callback from `SPOTIPY_REDIRECT_URI` (the default is
+`http://localhost:8845/spotify/callback`), set the Spotify variables in `.env`,
+then use the setup page or run `docker compose -f compose.standalone.yaml exec music-sync python /app/spotify_auth.py`. Keep the port bound to localhost or
+put it behind an HTTPS reverse proxy; the container does not terminate TLS.
+
+Set `MUSIC_SYNC_SPOTIFY_*` or `MUSIC_SYNC_YTMUSIC_*` source variables in `.env`
+before starting the service. Both source families are disabled by default.
 
 Required configuration:
 

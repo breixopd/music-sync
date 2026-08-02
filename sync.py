@@ -32,6 +32,7 @@ SPOTIFY_REDIRECT_URI = os.environ.get(
 SPOTIPY_CLIENT_ID = os.environ.get("SPOTIPY_CLIENT_ID", "")
 SPOTIPY_CLIENT_SECRET = os.environ.get("SPOTIPY_CLIENT_SECRET", "")
 _AUDIO_SUFFIXES = ("*.mp3", "*.opus", "*.m4a", "*.ogg", "*.webm")
+_AUDIO_EXTENSIONS = frozenset(suffix[1:] for suffix in _AUDIO_SUFFIXES)
 _SPOTIFY_ID = re.compile(r"^[A-Za-z0-9]{22}$")
 _YOUTUBE_ID = re.compile(r"^[A-Za-z0-9_-]{11}$")
 
@@ -122,10 +123,15 @@ def _prefixed_audio_files(root: Path) -> dict[str, list[Path]]:
     indexed: dict[str, list[Path]] = {}
     if not root.exists():
         return indexed
-    for ext in _AUDIO_SUFFIXES:
-        for path in root.glob(ext):
-            prefix = path.name.split(" - ", 1)[0]
-            indexed.setdefault(prefix, []).append(path)
+    try:
+        entries = root.iterdir()
+    except OSError:
+        return indexed
+    for path in entries:
+        if path.suffix not in _AUDIO_EXTENSIONS:
+            continue
+        prefix = path.name.split(" - ", 1)[0]
+        indexed.setdefault(prefix, []).append(path)
     return indexed
 
 
@@ -139,8 +145,23 @@ def _managed_ids(path: Path) -> set[str]:
     return _load_json_list(path)
 
 
-def _audio_file_exists(root: Path, item_id: str) -> bool:
-    return any(next(root.glob(f"{item_id} - *{suffix[1:]}"), None) is not None for suffix in _AUDIO_SUFFIXES)
+def _audio_file_exists(root: Path, item_id: str, indexed: dict[str, list[Path]] | None = None) -> bool:
+    """Check an indexed item, falling back to a targeted post-download scan."""
+    if indexed is not None:
+        return item_id in indexed
+    try:
+        return any(next(root.glob(f"{item_id} - *{extension}"), None) is not None for extension in _AUDIO_EXTENSIONS)
+    except OSError:
+        return False
+
+
+def _index_downloaded_files(indexed: dict[str, list[Path]], item_id: str) -> None:
+    """Mark one verified download in the maintained source index.
+
+    The downloader already verifies materialization. An in-memory marker avoids
+    another full directory walk; the next run rebuilds paths from disk.
+    """
+    indexed[item_id] = []
 
 
 def _spotify_client() -> Spotify | None:
@@ -271,6 +292,7 @@ def sync_spotify() -> SourceResult:
             try:
                 if _download_spotify_track(track):
                     result.downloaded += 1
+                    _index_downloaded_files(current_files, track_id)
                 else:
                     result.failed += 1
             except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -391,6 +413,7 @@ def sync_ytmusic() -> SourceResult:
                     try:
                         if _download_youtube_video(video_id):
                             result.downloaded += 1
+                            _index_downloaded_files(current_files, video_id)
                         else:
                             result.failed += 1
                     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -411,6 +434,7 @@ def sync_ytmusic() -> SourceResult:
                     try:
                         if _download_youtube_video(video_id):
                             result.downloaded += 1
+                            _index_downloaded_files(current_files, video_id)
                         else:
                             result.failed += 1
                     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):

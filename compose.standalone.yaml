@@ -1,0 +1,27 @@
+services:
+  music-sync:
+    image: ghcr.io/breixopd/music-sync:v1.2.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8845:8845"
+    environment:
+      MUSIC_SYNC_WEB_USERNAME: ${MUSIC_SYNC_WEB_USERNAME:-music-admin}
+      MUSIC_SYNC_WEB_PASSWORD: ${MUSIC_SYNC_WEB_PASSWORD:?set MUSIC_SYNC_WEB_PASSWORD in .env}
+      MUSIC_SYNC_WEB_SECRET: ${MUSIC_SYNC_WEB_SECRET:?set MUSIC_SYNC_WEB_SECRET in .env}
+      MUSIC_SYNC_WEB_PUBLIC_URL: ${MUSIC_SYNC_WEB_PUBLIC_URL:-http://localhost:8845}
+      SPOTIPY_CLIENT_ID: ${SPOTIPY_CLIENT_ID:-}
+      SPOTIPY_CLIENT_SECRET: ${SPOTIPY_CLIENT_SECRET:-}
+      SPOTIPY_REDIRECT_URI: ${SPOTIPY_REDIRECT_URI:-http://localhost:8845/spotify/callback}
+      MUSIC_SYNC_SPOTIFY_SAVED_TRACKS: ${MUSIC_SYNC_SPOTIFY_SAVED_TRACKS:-false}
+      MUSIC_SYNC_SPOTIFY_PLAYLISTS: ${MUSIC_SYNC_SPOTIFY_PLAYLISTS:-}
+      MUSIC_SYNC_YTMUSIC_LIKED: ${MUSIC_SYNC_YTMUSIC_LIKED:-false}
+      MUSIC_SYNC_YTMUSIC_PLAYLISTS: ${MUSIC_SYNC_YTMUSIC_PLAYLISTS:-}
+      MUSIC_SYNC_INTERVAL_MINUTES: ${MUSIC_SYNC_INTERVAL_MINUTES:-60}
+      MUSIC_SYNC_PRUNE: ${MUSIC_SYNC_PRUNE:-false}
+    volumes:
+      - music_sync_config:/config
+      - music_sync_music:/music
+
+volumes:
+  music_sync_config:
+  music_sync_music:
