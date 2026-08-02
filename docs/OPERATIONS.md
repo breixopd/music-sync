@@ -2,6 +2,11 @@
 
 This service is intentionally standalone. The parent Homelab Toolkit deploys
 the container and owns routing, secrets, metrics scraping, and update policy.
+For an independent deployment, use the checked-in
+`compose.standalone.yaml`; it binds the service to localhost, persists `/config`
+and `/music`, and requires `MUSIC_SYNC_WEB_PASSWORD` and
+`MUSIC_SYNC_WEB_SECRET` in `.env`. The container provides HTTP only, so use an
+HTTPS reverse proxy before exposing it beyond localhost.
 
 ## Stable HTTP contract
 

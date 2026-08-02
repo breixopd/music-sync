@@ -50,6 +50,9 @@ HEARTBEAT_FILE = Path("/tmp/music-sync-heartbeat")
 RUN_STATE_FILE = CONFIG_ROOT / "state" / "run.json"
 PUBLIC_URL = os.environ.get("MUSIC_SYNC_WEB_PUBLIC_URL", "")
 AUDIO_EXTENSIONS = ("*.mp3", "*.opus", "*.m4a", "*.ogg", "*.webm")
+_AUDIO_SUFFIXES = frozenset(pattern[1:] for pattern in AUDIO_EXTENSIONS)
+_audio_count_cache: dict[str, tuple[int | None, int]] = {}
+_audio_count_cache_lock = threading.Lock()
 _sync_lock = threading.Lock()
 API_CONTRACT_VERSION = "1"
 
@@ -67,11 +70,24 @@ def _positive_int(value: str | None, default: int, maximum: int | None = None) -
 
 
 def _count_audio_files(root: Path) -> int:
-    if not root.exists():
-        return 0
-    total = 0
-    for pattern in AUDIO_EXTENSIONS:
-        total += sum(1 for _ in root.glob(pattern))
+    try:
+        mtime_ns = root.stat().st_mtime_ns
+    except OSError:
+        mtime_ns = None
+    cache_key = str(root)
+    with _audio_count_cache_lock:
+        cached = _audio_count_cache.get(cache_key)
+        if cached is not None and cached[0] == mtime_ns:
+            return cached[1]
+    if mtime_ns is None:
+        total = 0
+    else:
+        try:
+            total = sum(1 for path in root.iterdir() if path.is_file() and path.suffix in _AUDIO_SUFFIXES)
+        except OSError:
+            total = 0
+    with _audio_count_cache_lock:
+        _audio_count_cache[cache_key] = (mtime_ns, total)
     return total
 
 
